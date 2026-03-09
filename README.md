@@ -186,10 +186,12 @@ If the public IP is unchanged from the previous run and the DDNS configuration i
 Run every 5 minutes:
 
 ```bash
-*/5 * * * * CF_API_TOKEN="your_token_here" /usr/bin/python3 /Users/morganjonasson/dev/cloudflare_ddns/cloudflare_ddns.py
+*/5 * * * * /usr/bin/python3 /path/to/cloudflare_ddns/cloudflare_ddns.py
 ```
 
-This default cron example assumes `cloudflare_records.json` exists next to the script. Adjust the Python path and script path to match your system.
+This default cron example assumes `.env` and `cloudflare_records.json` exist next to the script. Adjust the Python path and script path to match your system.
+
+If `.env` is present next to `cloudflare_ddns.py`, you do not need to repeat `CF_API_TOKEN` in the cron entry because the updater loads `.env` automatically.
 
 ## Notes
 
