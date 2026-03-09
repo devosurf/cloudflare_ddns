@@ -7,6 +7,7 @@ Repository-specific guidance for coding agents working in `/Users/morganjonasson
 - Interactive setup helper: `configure_cloudflare_ddns.py`.
 - Docs: `README.md`.
 - Config example: `.env.example`.
+- Record map example: `cloudflare_records.example.json`.
 - Runtime files may include `.env` and `.cloudflare_ddns_state.json`.
 
 ## Instruction Files
@@ -69,8 +70,9 @@ Expected current behavior: it exits with `CF_API_TOKEN is required` when no conf
 - `cloudflare_ddns.py` holds most core logic.
 - `CloudflareClient` is the shared place for Cloudflare API requests.
 - Config is env-driven and `.env` is loaded automatically by the updater.
+- The default setup keeps the API token in `.env` and record mappings in `cloudflare_records.json`.
 - The updater caches the last IP plus a config fingerprint in JSON state.
-- The helper scans Cloudflare for matching `A` records and writes `.env`.
+- The helper scans Cloudflare for matching `A` records and writes `.env` plus `cloudflare_records.json`.
 - Prefer extending existing helpers instead of duplicating Cloudflare request code.
 
 ## Code Style to Follow

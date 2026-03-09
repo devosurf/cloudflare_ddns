@@ -5,17 +5,18 @@ This repository contains a standalone Python script that checks the current publ
 Scripts:
 
 - `cloudflare_ddns.py` - updater
-- `configure_cloudflare_ddns.py` - interactive `.env` generator based on existing Cloudflare `A` records
+- `configure_cloudflare_ddns.py` - interactive generator for `.env` and `cloudflare_records.json`
 
 ## Features
 
 - Updates multiple Cloudflare DNS records in one run
 - Supports `A` and `AAAA` records
 - Uses a Cloudflare API token
-- Accepts either a zone ID, a zone name, or infers zones per record
+- Supports a JSON record map with zone objects and record lists
+- Still accepts zone IDs, zone names, or record-name inference as fallbacks
 - Caches the last detected public IP in a local state file to avoid unnecessary Cloudflare API calls
 - Uses only the Python standard library
-- Can generate a `.env` file by scanning Cloudflare for existing `A` records that match a known IPv4 address
+- Can generate a JSON record map by scanning Cloudflare for existing `A` records that match a known IPv4 address
 
 ## Requirements
 
@@ -25,25 +26,32 @@ Scripts:
 Recommended token permissions:
 
 - `Zone:Read`
-- `DNS:Edit`
+- `DNS:Read` for the setup helper scan
+- `DNS:Edit` for the updater
 
 ## Configuration
 
 The updater reads configuration from environment variables and also loads a local `.env` file automatically when one exists next to `cloudflare_ddns.py`.
+
+The default setup now uses:
+
+- `.env` for `CF_API_TOKEN`
+- `cloudflare_records.json` for zone-to-record mappings
 
 ### Required variables
 
 | Variable | Description |
 | --- | --- |
 | `CF_API_TOKEN` | Cloudflare API token |
-| `CF_RECORDS` | Comma-separated record names to update |
-| `CF_ZONE_ID` or `CF_ZONE_NAME` | Optional when records can be inferred across accessible zones |
+| `CF_RECORDS` | Comma-separated record names to update when not using a JSON record map |
+| `CF_ZONE_ID` or `CF_ZONE_NAME` | Optional fallback when not using a JSON record map |
 
 ### Optional variables
 
 | Variable | Description | Default |
 | --- | --- | --- |
 | `CF_ACCOUNT_ID` | Optional Cloudflare account ID used when scanning or inferring zones | Unset |
+| `CF_RECORD_MAP_FILE` | Optional path to a JSON file containing zone objects and record lists | `cloudflare_records.json` next to the script when present |
 | `CF_RECORD_TYPE` | Force record type: `A` or `AAAA` | Auto-detect from public IP |
 | `CF_IP_URLS` | Comma-separated public IP endpoints | Built-in fallback list |
 | `CF_STATE_FILE` | Path to the local state file | `.cloudflare_ddns_state.json` next to the script |
@@ -58,7 +66,8 @@ The setup helper will:
 2. optionally prompt for your Cloudflare account ID
 3. prompt for the IPv4 address to search for
 4. scan all accessible zones for `A` records with that IP
-5. write or create `.env` with the matching records prefilled
+5. write or create `.env` with your API token
+6. write or update `cloudflare_records.json` with zone objects and record lists
 
 Run it with:
 
@@ -72,7 +81,53 @@ You can also pass values on the command line:
 python3 configure_cloudflare_ddns.py --api-token "your_token" --account-id "your_account_id" --ip "203.0.113.10"
 ```
 
-The helper writes `.env` in the project directory by default. If records are found in a single zone, it writes both `CF_ZONE_ID` and `CF_ZONE_NAME`. If records span multiple zones, it leaves those unset and the updater infers the correct zone for each record at runtime.
+Use a custom env file path:
+
+```bash
+python3 configure_cloudflare_ddns.py --env-file "/path/to/cloudflare_ddns.env"
+```
+
+Use a custom record map path:
+
+```bash
+python3 configure_cloudflare_ddns.py --record-map-file "/path/to/cloudflare_records.json"
+```
+
+Preview the generated files without writing them:
+
+```bash
+python3 configure_cloudflare_ddns.py --dry-run
+```
+
+If the target `.env` already exists, the helper reads it first and reuses existing values as prompt defaults. The API token prompt is hidden input.
+
+The helper writes `.env` and `cloudflare_records.json` in the project directory by default.
+
+The helper writes or updates these keys:
+
+- `CF_API_TOKEN`
+- `CF_RECORD_MAP_FILE` only when you choose a non-default JSON path
+
+It removes the older record-selection env keys (`CF_RECORDS`, `CF_ZONE_ID`, `CF_ZONE_NAME`, `CF_RECORD_TYPE`, `CF_ACCOUNT_ID`) and preserves unrelated existing `.env` keys.
+
+The generated JSON is grouped by zone and written in a deterministic order: zones are sorted by `zone_name` and `zone_id`, and each zone's `records` list is sorted alphabetically.
+
+The generated JSON file looks like this:
+
+```json
+{
+  "zones": [
+    {
+      "zone_id": "your_zone_id_here",
+      "zone_name": "example.com",
+      "records": [
+        "home.example.com",
+        "vpn.example.com"
+      ]
+    }
+  ]
+}
+```
 
 ## Usage
 
@@ -81,6 +136,8 @@ The helper writes `.env` in the project directory by default. If records are fou
 ```bash
 python3 cloudflare_ddns.py
 ```
+
+With the default JSON workflow, `.env` only needs `CF_API_TOKEN` and the updater automatically reads `cloudflare_records.json` when it exists next to the script.
 
 ### Example using a zone name
 
@@ -114,12 +171,13 @@ Use `A` instead if you want to force IPv4.
 ## What the script does
 
 1. Loads `.env` if present
-2. Detects the current public IP address
-3. Determines the record type automatically unless `CF_RECORD_TYPE` is set
-4. Resolves zones from `CF_ZONE_ID`, `CF_ZONE_NAME`, or record names
-5. Checks each configured DNS record in Cloudflare
-6. Updates only records whose IP differs from the current public IP
-7. Stores the detected IP in a local state file
+2. Loads `cloudflare_records.json` if present
+3. Detects the current public IP address
+4. Determines the record type automatically unless `CF_RECORD_TYPE` is set
+5. Resolves zones from the JSON map, explicit zone env vars, or record names
+6. Checks each configured DNS record in Cloudflare
+7. Updates only records whose IP differs from the current public IP
+8. Stores the detected IP in a local state file
 
 If the public IP is unchanged from the previous run and the DDNS configuration is unchanged, the script exits early and skips Cloudflare API calls.
 
@@ -128,24 +186,26 @@ If the public IP is unchanged from the previous run and the DDNS configuration i
 Run every 5 minutes:
 
 ```bash
-*/5 * * * * CF_API_TOKEN="your_token_here" CF_ZONE_NAME="example.com" CF_RECORDS="home.example.com,vpn.example.com" /usr/bin/python3 /Users/morganjonasson/dev/cloudflare_ddns/cloudflare_ddns.py
+*/5 * * * * CF_API_TOKEN="your_token_here" /usr/bin/python3 /Users/morganjonasson/dev/cloudflare_ddns/cloudflare_ddns.py
 ```
 
-Adjust the Python path and script path to match your system.
+This default cron example assumes `cloudflare_records.json` exists next to the script. Adjust the Python path and script path to match your system.
 
 ## Notes
 
 - The DNS records should already exist in Cloudflare
-- `CF_RECORDS` should contain fully qualified record names
+- JSON record maps should contain fully qualified record names
 - The state file is a local optimization so repeated runs do less work when the IP has not changed
-- Updating the record list, zone settings, or account filter invalidates the cached skip behavior automatically
+- Updating the JSON record map or zone settings invalidates the cached skip behavior automatically
 - The script preserves the existing record `ttl` and `proxied` values when updating
 - `.env.example` shows the expected file shape
+- `cloudflare_records.example.json` shows the JSON mapping shape
 - The setup helper searches only for `A` records because it is designed to bootstrap IPv4-based DDNS migration
 
 ## Files
 
 - `cloudflare_ddns.py` - the updater script
-- `configure_cloudflare_ddns.py` - interactive `.env` setup helper
+- `configure_cloudflare_ddns.py` - interactive setup helper
 - `.env.example` - example configuration template
+- `cloudflare_records.example.json` - example JSON record map
 - `README.md` - usage and setup instructions
