@@ -1,0 +1,12 @@
+{
+  "zones": [
+    {
+      "zone_id": "your_zone_id_here",
+      "zone_name": "example.com",
+      "records": [
+        "home.example.com",
+        "vpn.example.com"
+      ]
+    }
+  ]
+}

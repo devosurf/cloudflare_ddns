@@ -3,17 +3,20 @@
 
 Environment variables:
   CF_API_TOKEN        Required. Cloudflare API token with Zone:Read and DNS:Edit.
+  CF_RECORD_MAP_FILE  Optional. Path to a JSON file describing zone-to-record mappings.
   CF_ZONE_ID          Optional. Cloudflare zone ID.
   CF_ZONE_NAME        Optional if CF_ZONE_ID is set. Zone name, e.g. example.com.
-  CF_RECORDS          Required. Comma-separated record names, e.g. home.example.com,vpn.example.com.
+  CF_RECORDS          Optional when CF_RECORD_MAP_FILE is used.
   CF_RECORD_TYPE      Optional. Force A or AAAA. Defaults to the detected IP family.
   CF_IP_URLS          Optional. Comma-separated IP discovery endpoints.
   CF_STATE_FILE       Optional. Path to the local cache file.
 
 Examples:
   CF_API_TOKEN=... \
-  CF_ZONE_NAME=example.com \
-  CF_RECORDS=home.example.com,vpn.example.com \
+  python3 cloudflare_ddns.py
+
+  CF_API_TOKEN=... \
+  CF_RECORD_MAP_FILE=cloudflare_records.json \
   python3 cloudflare_ddns.py
 """
 
@@ -35,6 +38,7 @@ DEFAULT_IP_URLS = (
     "https://ipv4.icanhazip.com",
 )
 DEFAULT_ENV_FILE = Path(__file__).with_name(".env")
+DEFAULT_RECORD_MAP_FILE = Path(__file__).with_name("cloudflare_records.json")
 DEFAULT_STATE_FILE = Path(__file__).with_name(".cloudflare_ddns_state.json")
 CF_API_BASE = "https://api.cloudflare.com/client/v4"
 
@@ -47,6 +51,7 @@ class DDNSError(RuntimeError):
 class Config:
     api_token: str
     account_id: str | None
+    record_map_file: Path | None
     zone_id: str | None
     zone_name: str | None
     record_names: tuple[str, ...]
@@ -83,6 +88,8 @@ def load_dotenv(path: Path) -> None:
 def load_config() -> Config:
     api_token = os.environ.get("CF_API_TOKEN", "").strip()
     account_id = os.environ.get("CF_ACCOUNT_ID", "").strip() or None
+    record_map_value = os.environ.get("CF_RECORD_MAP_FILE", "").strip()
+    record_map_file = Path(record_map_value).expanduser() if record_map_value else None
     zone_id = os.environ.get("CF_ZONE_ID", "").strip() or None
     zone_name = os.environ.get("CF_ZONE_NAME", "").strip() or None
     record_type = os.environ.get("CF_RECORD_TYPE", "").strip().upper() or None
@@ -94,9 +101,12 @@ def load_config() -> Config:
     ) or DEFAULT_IP_URLS
     state_file = Path(os.environ.get("CF_STATE_FILE", str(DEFAULT_STATE_FILE))).expanduser()
 
+    if record_map_file is None and DEFAULT_RECORD_MAP_FILE.exists():
+        record_map_file = DEFAULT_RECORD_MAP_FILE
+
     if not api_token:
         raise DDNSError("CF_API_TOKEN is required")
-    if not record_names:
+    if not record_names and record_map_file is None:
         raise DDNSError("CF_RECORDS must contain at least one DNS name")
     if record_type not in {None, "A", "AAAA"}:
         raise DDNSError("CF_RECORD_TYPE must be A or AAAA when set")
@@ -104,6 +114,7 @@ def load_config() -> Config:
     return Config(
         api_token=api_token,
         account_id=account_id,
+        record_map_file=record_map_file,
         zone_id=zone_id,
         zone_name=zone_name,
         record_names=record_names,
@@ -128,6 +139,43 @@ def write_state(path: Path, state: dict[str, Any]) -> None:
         path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     except OSError as exc:
         raise DDNSError(f"Failed to write state file {path}: {exc}") from exc
+
+
+def load_record_map(path: Path) -> dict[str, dict[str, str]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise DDNSError(f"Failed to read record map file {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise DDNSError(f"Invalid JSON in record map file {path}: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise DDNSError(f"Record map file must contain a JSON object: {path}")
+    zones = payload.get("zones")
+    if not isinstance(zones, list) or not zones:
+        raise DDNSError(f"Record map file must contain a non-empty 'zones' list: {path}")
+
+    record_zones: dict[str, dict[str, str]] = {}
+    for zone in zones:
+        if not isinstance(zone, dict):
+            raise DDNSError(f"Each zone entry in {path} must be an object")
+        zone_id = zone.get("zone_id")
+        zone_name = zone.get("zone_name")
+        records = zone.get("records")
+        if not isinstance(zone_id, str) or not zone_id:
+            raise DDNSError(f"Each zone entry in {path} needs a non-empty 'zone_id'")
+        if not isinstance(zone_name, str) or not zone_name:
+            raise DDNSError(f"Each zone entry in {path} needs a non-empty 'zone_name'")
+        if not isinstance(records, list) or not records:
+            raise DDNSError(f"Each zone entry in {path} needs a non-empty 'records' list")
+        for record_name in records:
+            if not isinstance(record_name, str) or not record_name.strip():
+                raise DDNSError(f"Record names in {path} must be non-empty strings")
+            normalized_record = record_name.strip()
+            if normalized_record in record_zones:
+                raise DDNSError(f"Duplicate record in record map file {path}: {normalized_record}")
+            record_zones[normalized_record] = {"zone_id": zone_id, "zone_name": zone_name}
+    return record_zones
 
 
 def http_request(
@@ -327,6 +375,9 @@ def is_record_within_zone(record_name: str, zone_name: str) -> bool:
 
 
 def resolve_record_zones(config: Config, client: CloudflareClient) -> dict[str, dict[str, str]]:
+    if config.record_map_file is not None:
+        return load_record_map(config.record_map_file)
+
     if config.zone_id or config.zone_name:
         zone_id = client.resolve_zone_id(config.zone_id, config.zone_name)
         zone_name = config.zone_name
@@ -368,12 +419,10 @@ def desired_record_type(ip_text: str, configured_type: str | None) -> str:
     return "AAAA" if version == 6 else "A"
 
 
-def config_fingerprint(config: Config) -> dict[str, Any]:
+def record_config_fingerprint(config: Config, record_zones: dict[str, dict[str, str]]) -> dict[str, Any]:
     return {
-        "account_id": config.account_id,
-        "record_names": config.record_names,
-        "zone_id": config.zone_id,
-        "zone_name": config.zone_name,
+        "record_map_file": str(config.record_map_file) if config.record_map_file else None,
+        "record_zones": record_zones,
     }
 
 
@@ -384,7 +433,10 @@ def main() -> int:
     current_ip = detect_public_ip(config.ip_urls)
     record_type = desired_record_type(current_ip, config.record_type)
     last_ip = state.get("public_ip")
-    current_fingerprint = config_fingerprint(config)
+    client = CloudflareClient(config.api_token)
+    record_zones = resolve_record_zones(config, client)
+    record_names = tuple(record_zones.keys())
+    current_fingerprint = record_config_fingerprint(config, record_zones)
 
     if (
         last_ip == current_ip
@@ -394,12 +446,10 @@ def main() -> int:
         print(f"Public IP unchanged at {current_ip}; skipping Cloudflare update.")
         return 0
 
-    client = CloudflareClient(config.api_token)
-    record_zones = resolve_record_zones(config, client)
     updated_records: list[str] = []
     unchanged_records: list[str] = []
 
-    for record_name in config.record_names:
+    for record_name in record_names:
         zone_id = record_zones[record_name]["zone_id"]
         record = client.get_record(zone_id, record_name, record_type)
         existing_ip = str(record.get("content", "")).strip()
@@ -419,7 +469,7 @@ def main() -> int:
         "public_ip": current_ip,
         "record_type": record_type,
         "config_fingerprint": current_fingerprint,
-        "updated_records": config.record_names,
+        "updated_records": record_names,
         "zones": record_zones,
     }
     write_state(config.state_file, new_state)
