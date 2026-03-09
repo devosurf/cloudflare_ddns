@@ -66,8 +66,9 @@ The setup helper will:
 2. optionally prompt for your Cloudflare account ID
 3. prompt for the IPv4 address to search for
 4. scan all accessible zones for `A` records with that IP
-5. write or create `.env` with your API token
-6. write or update `cloudflare_records.json` with zone objects and record lists
+5. show every matching record and let you choose which ones to include
+6. write or create `.env` with your API token
+7. write or update `cloudflare_records.json` with zone objects and record lists
 
 Run it with:
 
@@ -93,6 +94,12 @@ Use a custom record map path:
 python3 configure_cloudflare_ddns.py --record-map-file "/path/to/cloudflare_records.json"
 ```
 
+Skip the interactive selection step and include every match:
+
+```bash
+python3 configure_cloudflare_ddns.py --all-matches
+```
+
 Preview the generated files without writing them:
 
 ```bash
@@ -100,6 +107,8 @@ python3 configure_cloudflare_ddns.py --dry-run
 ```
 
 If the target `.env` already exists, the helper reads it first and reuses existing values as prompt defaults. The API token prompt is hidden input.
+
+By default, interactive runs do not blindly include every match. The helper prints numbered results and asks you which records to keep. Use `--all-matches` only if you really want every matching record included.
 
 The helper writes `.env` and `cloudflare_records.json` in the project directory by default.
 

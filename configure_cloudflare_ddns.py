@@ -30,6 +30,60 @@ class Match:
     ttl: int
 
 
+def parse_selection(raw: str, max_index: int) -> list[int]:
+    selected: set[int] = set()
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+            if start > end:
+                raise DDNSError(f"Invalid range: {token}")
+            for index in range(start, end + 1):
+                if index < 1 or index > max_index:
+                    raise DDNSError(f"Selection out of range: {index}")
+                selected.add(index)
+            continue
+        index = int(token)
+        if index < 1 or index > max_index:
+            raise DDNSError(f"Selection out of range: {index}")
+        selected.add(index)
+    return sorted(selected)
+
+
+def choose_matches(matches: list[Match], *, non_interactive: bool) -> list[Match]:
+    if not matches:
+        return []
+    if non_interactive:
+        return matches
+
+    print("Select which records to include in the record map.")
+    print("Enter comma-separated numbers or ranges like 1,3,5-7.")
+    print("Type 'all' to keep every match or 'none' to cancel.")
+
+    while True:
+        response = input("Selection [all]: ").strip().lower()
+        if response in {"", "all"}:
+            confirm = input(f"Include all {len(matches)} records? [y/N]: ").strip().lower()
+            if confirm in {"y", "yes"}:
+                return matches
+            response = input("Selection: ").strip().lower()
+        if response == "none":
+            raise DDNSError("No records selected")
+        try:
+            selected_indexes = parse_selection(response, len(matches))
+        except (DDNSError, ValueError) as exc:
+            print(f"Invalid selection: {exc}")
+            continue
+        if not selected_indexes:
+            print("Select at least one record.")
+            continue
+        return [matches[index - 1] for index in selected_indexes]
+
+
 def read_env_file(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
@@ -117,6 +171,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--env-file", dest="env_file", default=str(DEFAULT_ENV_FILE))
     parser.add_argument("--record-map-file", dest="record_map_file", default=str(DEFAULT_RECORD_MAP_FILE))
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")
+    parser.add_argument("--all-matches", dest="all_matches", action="store_true")
     return parser.parse_args()
 
 
@@ -199,13 +254,20 @@ def main() -> int:
         raise DDNSError(f"No A records found with IP {normalized_ip}")
 
     print(f"Found {len(matches)} matching A record(s) for {normalized_ip}:")
-    for match in matches:
+    for index, match in enumerate(matches, start=1):
         proxy_label = "proxied" if match.proxied else "dns-only"
-        print(f"- {match.record_name} ({match.zone_name}, ttl={match.ttl}, {proxy_label})")
+        print(f"{index}. {match.record_name} ({match.zone_name}, ttl={match.ttl}, {proxy_label})")
+
+    selected_matches = choose_matches(
+        matches,
+        non_interactive=args.all_matches or args.dry_run or not sys.stdin.isatty(),
+    )
+    if len(selected_matches) != len(matches):
+        print(f"Selected {len(selected_matches)} of {len(matches)} matching records.")
 
     values = build_env(existing, api_token, record_map_file)
     env_content = render_env_file(values)
-    record_map_content = render_record_map(matches)
+    record_map_content = render_record_map(selected_matches)
 
     if args.dry_run:
         print("Dry run: no files were written.")
@@ -218,7 +280,7 @@ def main() -> int:
 
     env_file.parent.mkdir(parents=True, exist_ok=True)
     record_map_file.parent.mkdir(parents=True, exist_ok=True)
-    write_record_map_file(record_map_file, matches)
+    write_record_map_file(record_map_file, selected_matches)
     write_env_file(env_file, values)
 
     print(f"Wrote configuration to {env_file}")
