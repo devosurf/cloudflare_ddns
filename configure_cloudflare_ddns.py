@@ -5,11 +5,19 @@ from __future__ import annotations
 import argparse
 import getpass
 import ipaddress
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from cloudflare_ddns import CloudflareClient, DEFAULT_ENV_FILE, DDNSError, load_dotenv, parse_env_value
+from cloudflare_ddns import (
+    CloudflareClient,
+    DEFAULT_ENV_FILE,
+    DEFAULT_RECORD_MAP_FILE,
+    DDNSError,
+    load_dotenv,
+    parse_env_value,
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +54,40 @@ def write_env_file(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def render_env_file(values: dict[str, str]) -> str:
+    lines = [f"{key}={env_quote(value)}" for key, value in values.items() if value != ""]
+    return "\n".join(lines) + "\n"
+
+
+def build_record_map_payload(matches: list[Match]) -> dict[str, object]:
+    zones: dict[tuple[str, str], list[str]] = {}
+    for match in matches:
+        key = (match.zone_id, match.zone_name)
+        zones.setdefault(key, []).append(match.record_name)
+
+    return {
+        "zones": [
+            {
+                "zone_id": zone_id,
+                "zone_name": zone_name,
+                "records": sorted(records),
+            }
+            for zone_id, zone_name, records in sorted(
+                ((zone_id, zone_name, records) for (zone_id, zone_name), records in zones.items()),
+                key=lambda item: (item[1], item[0]),
+            )
+        ]
+    }
+
+
+def render_record_map(matches: list[Match]) -> str:
+    return json.dumps(build_record_map_payload(matches), indent=2) + "\n"
+
+
+def write_record_map_file(path: Path, matches: list[Match]) -> None:
+    path.write_text(render_record_map(matches), encoding="utf-8")
+
+
 def prompt_value(prompt: str, default: str | None = None, secret: bool = False) -> str:
     if not sys.stdin.isatty():
         if default is not None:
@@ -73,6 +115,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--account-id", dest="account_id")
     parser.add_argument("--ip", dest="target_ip")
     parser.add_argument("--env-file", dest="env_file", default=str(DEFAULT_ENV_FILE))
+    parser.add_argument("--record-map-file", dest="record_map_file", default=str(DEFAULT_RECORD_MAP_FILE))
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true")
     return parser.parse_args()
 
 
@@ -106,32 +150,30 @@ def discover_matches(client: CloudflareClient, account_id: str | None, target_ip
     return matches
 
 
-def build_env(existing: dict[str, str], api_token: str, account_id: str | None, matches: list[Match]) -> dict[str, str]:
+def build_env(existing: dict[str, str], api_token: str, record_map_file: Path) -> dict[str, str]:
     values = dict(existing)
     values["CF_API_TOKEN"] = api_token
-    values["CF_RECORD_TYPE"] = "A"
-    values["CF_RECORDS"] = ",".join(match.record_name for match in matches)
-    if account_id:
-        values["CF_ACCOUNT_ID"] = account_id
+    if record_map_file != DEFAULT_RECORD_MAP_FILE:
+        values["CF_RECORD_MAP_FILE"] = str(record_map_file)
     else:
-        values.pop("CF_ACCOUNT_ID", None)
+        values.pop("CF_RECORD_MAP_FILE", None)
 
-    zone_pairs = {(match.zone_id, match.zone_name) for match in matches}
-    if len(zone_pairs) == 1:
-        zone_id, zone_name = next(iter(zone_pairs))
-        values["CF_ZONE_ID"] = zone_id
-        values["CF_ZONE_NAME"] = zone_name
-    else:
-        values.pop("CF_ZONE_ID", None)
-        values.pop("CF_ZONE_NAME", None)
-
-    values.setdefault("CF_STATE_FILE", str(Path(__file__).with_name(".cloudflare_ddns_state.json")))
+    for key in (
+        "CF_ACCOUNT_ID",
+        "CF_ZONE_ID",
+        "CF_ZONE_NAME",
+        "CF_RECORDS",
+        "CF_RECORD_TYPE",
+        "CF_STATE_FILE",
+    ):
+        values.pop(key, None)
     return values
 
 
 def main() -> int:
     args = parse_args()
     env_file = Path(args.env_file).expanduser()
+    record_map_file = Path(args.record_map_file).expanduser()
     existing = read_env_file(env_file)
     if env_file.exists():
         load_dotenv(env_file)
@@ -161,13 +203,26 @@ def main() -> int:
         proxy_label = "proxied" if match.proxied else "dns-only"
         print(f"- {match.record_name} ({match.zone_name}, ttl={match.ttl}, {proxy_label})")
 
-    values = build_env(existing, api_token, account_id or None, matches)
+    values = build_env(existing, api_token, record_map_file)
+    env_content = render_env_file(values)
+    record_map_content = render_record_map(matches)
+
+    if args.dry_run:
+        print("Dry run: no files were written.")
+        print(f"Would write configuration to {env_file}:")
+        print(env_content, end="")
+        print(f"Would write record map to {record_map_file}:")
+        print(record_map_content, end="")
+        print("Run the updater with: python3 cloudflare_ddns.py")
+        return 0
+
     env_file.parent.mkdir(parents=True, exist_ok=True)
+    record_map_file.parent.mkdir(parents=True, exist_ok=True)
+    write_record_map_file(record_map_file, matches)
     write_env_file(env_file, values)
 
     print(f"Wrote configuration to {env_file}")
-    if "CF_ZONE_ID" not in values:
-        print("Matched records span multiple zones; CF_ZONE_ID and CF_ZONE_NAME were left unset.")
+    print(f"Wrote record map to {record_map_file}")
     print("Run the updater with: python3 cloudflare_ddns.py")
     return 0
 
