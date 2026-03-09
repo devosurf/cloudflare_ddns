@@ -122,7 +122,7 @@ Expected current behavior: it exits with `CF_API_TOKEN is required` when no conf
 ### Cloudflare integration style
 - Reuse `CloudflareClient` rather than duplicating request code.
 - Validate Cloudflare JSON before trusting fields.
-- Prefer documented structured filters such as `name.exact` and `content[exact]`.
+- Prefer documented structured filters such as `name.exact` and `content.exact`.
 - Preserve record metadata like `ttl` and `proxied` when updating.
 - Avoid unnecessary Cloudflare API calls when local state proves nothing changed.
 

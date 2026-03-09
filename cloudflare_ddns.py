@@ -324,7 +324,7 @@ class CloudflareClient:
                 f"/zones/{zone_id}/dns_records",
                 params={
                     "type": record_type,
-                    "content[exact]": content,
+                    "content.exact": content,
                     "match": "all",
                     "per_page": "100",
                     "page": str(page),
